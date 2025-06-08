@@ -16,7 +16,7 @@ mapeo_dias = {
     "Wednesday": "miércoles",
     "Thursday": "jueves",
     "Friday": "viernes",
-    "Saturday": "sábado",
+    "Saturday": "sabado",
     "Sunday": "domingo",
 }
 
@@ -28,11 +28,10 @@ def leer_json(ruta: str):
 
 
 def asignar_tareas(json: dict, tiempo_semanal: float, frecuencias: dict):
-    from datetime import datetime
+    from datetime import datetime, timedelta
     from statistics import mean
 
-    tareas_por_materia = {}
-    tareas_por_actividad = {}
+    tareas_actividad = {}
 
     # Mapeo de números de día a nombres en español
     dias_semana = {
@@ -41,80 +40,147 @@ def asignar_tareas(json: dict, tiempo_semanal: float, frecuencias: dict):
         2: "miércoles",
         3: "jueves",
         4: "viernes",
-        5: "sábado",
+        5: "sabado",
         6: "domingo",
     }
 
-    # Inicializar tareas por materia y por actividad
+    # Obtener fecha actual
+    fecha_actual = datetime.now().date()
+
+    # Diccionario auxiliar para tracking de materias (para aplicar frecuencias por materia)
+    tareas_por_materia = {}
     for materia in json["tareas"].keys():
         tareas_por_materia[materia] = 0
-        for tarea in json["tareas"][materia]:
-            tareas_por_materia[materia] += tarea["tiempoDuracion"] / 60
-            descripcion = tarea["descripcion"]
-            tiempo_horas = tarea["tiempoDuracion"] / 60
-            # Convertir fecha a día de la semana
-            fecha = datetime.strptime(tarea["fechaEntrega"], "%Y-%m-%d")
-            dia_semana = dias_semana[fecha.weekday()]
-            tareas_por_actividad[descripcion] = (tiempo_horas, dia_semana)
 
-    tiempo_restante = tiempo_semanal
-    tareas_procesadas = set()  # Para evitar procesar la misma tarea dos veces
+    # Procesar cada tarea y crear el diccionario principal
+    for materia in json["tareas"].keys():
+        for tarea in json["tareas"][materia]:
+            descripcion = tarea["descripcion"]
+            tiempo_total = tarea["tiempoDuracion"] / 60
+
+            # Procesar fecha de entrega
+            fecha_entrega = datetime.strptime(tarea["fechaEntrega"], "%Y-%m-%d").date()
+
+            # Calcular días faltantes
+            dias_faltantes = (fecha_entrega - fecha_actual).days
+
+            # Determinar día de la semana (solo si es <= 7 días)
+            if dias_faltantes <= 7:
+                dia_semana = dias_semana[fecha_entrega.weekday()]
+                # Todo el tiempo va en tiempo_horas
+                tiempo_horas = tiempo_total
+                tiempo_horas_sig = None
+            else:
+                dia_semana = None
+                # Algoritmo de distribución de tiempo según días faltantes
+                # Los primeros 7 días reciben una proporción del trabajo total
+                # Fórmula: entre 30% y 70% dependiendo de cuántos días falten
+                factor_base = 7 / dias_faltantes  # Proporción básica
+                factor_ajustado = 0.3 + (0.4 * factor_base)  # Entre 30% y 70%
+                factor_ajustado = min(factor_ajustado, 0.7)  # Máximo 70%
+
+                tiempo_horas = tiempo_total * factor_ajustado
+                tiempo_horas_sig = tiempo_total - tiempo_horas
+
+            # Crear entrada en el diccionario principal
+            tareas_actividad[descripcion] = {
+                "tiempo_horas": tiempo_horas,
+                "tiempo_horas_sig": tiempo_horas_sig,
+                "dia_semana": dia_semana,
+                "fecha_entrega": tarea["fechaEntrega"],
+                "dias_faltantes": dias_faltantes,
+                "materia": materia,  # Guardamos la materia para aplicar frecuencias
+                "tiempo_total_original": tiempo_total,  # Para aplicar frecuencias correctamente
+            }
+
+            # Actualizar contador por materia (con tiempo total original)
+            tareas_por_materia[materia] += tiempo_total
+
+    # Función auxiliar para recalcular distribución de tiempo
+    def recalcular_distribucion_tiempo(tiempo_total_nuevo, dias_faltantes):
+        """Recalcula la distribución entre tiempo_horas y tiempo_horas_sig"""
+        if dias_faltantes <= 7:
+            return tiempo_total_nuevo, None
+        else:
+            factor_base = 7 / dias_faltantes
+            factor_ajustado = 0.3 + (0.4 * factor_base)
+            factor_ajustado = min(factor_ajustado, 0.7)
+
+            tiempo_horas = tiempo_total_nuevo * factor_ajustado
+            tiempo_horas_sig = tiempo_total_nuevo - tiempo_horas
+            return tiempo_horas, tiempo_horas_sig
 
     # Aplicar frecuencias
+    tareas_procesadas = set()
+
     for key in frecuencias.keys():
         # Si es una actividad específica
-        if key in tareas_por_actividad and key not in tareas_procesadas:
-            tiempo_original, dia_semana = tareas_por_actividad[key]
-            tiempo_ajustado = (tiempo_original * frecuencias[key]) / mean(
+        if key in tareas_actividad and key not in tareas_procesadas:
+            tiempo_total_original = tareas_actividad[key]["tiempo_total_original"]
+            tiempo_total_ajustado = (tiempo_total_original * frecuencias[key]) / mean(
                 frecuencias.values()
             )
-            tareas_por_actividad[key] = (tiempo_ajustado, dia_semana)
-            tiempo_restante -= tiempo_ajustado
+
+            # Recalcular distribución con el nuevo tiempo total
+            dias_faltantes = tareas_actividad[key]["dias_faltantes"]
+            nuevo_tiempo_horas, nuevo_tiempo_horas_sig = recalcular_distribucion_tiempo(
+                tiempo_total_ajustado, dias_faltantes
+            )
+
+            # Actualizar tiempos en el diccionario principal
+            tareas_actividad[key]["tiempo_horas"] = nuevo_tiempo_horas
+            tareas_actividad[key]["tiempo_horas_sig"] = nuevo_tiempo_horas_sig
+            tareas_actividad[key]["tiempo_total_original"] = tiempo_total_ajustado
             tareas_procesadas.add(key)
 
-            # Actualizar también en tareas_por_materia
-            for materia in json["tareas"].keys():
-                for tarea in json["tareas"][materia]:
-                    if tarea["descripcion"] == key:
-                        tareas_por_materia[materia] -= tiempo_original
-                        tareas_por_materia[materia] += tiempo_ajustado
-                        break
+            # Actualizar también el tracking por materia
+            materia = tareas_actividad[key]["materia"]
+            tareas_por_materia[materia] -= tiempo_total_original
+            tareas_por_materia[materia] += tiempo_total_ajustado
 
         # Si es una materia completa
         elif key in tareas_por_materia:
-            tiempo_original_materia = tareas_por_materia[key]
-            tiempo_ajustado_materia = (
-                tiempo_original_materia * frecuencias[key]
-            ) / mean(frecuencias.values())
-            tareas_por_materia[key] = tiempo_ajustado_materia
+            factor_ajuste = frecuencias[key] / mean(frecuencias.values())
 
-            # Actualizar actividades de esta materia
-            for tarea in json["tareas"][key]:
-                descripcion = tarea["descripcion"]
-                if descripcion not in tareas_procesadas:
-                    tiempo_original_actividad, dia_semana = tareas_por_actividad[
-                        descripcion
-                    ]
-                    tiempo_ajustado_actividad = (
-                        tiempo_original_actividad * frecuencias[key]
-                    ) / mean(frecuencias.values())
-                    tareas_por_actividad[descripcion] = (
-                        tiempo_ajustado_actividad,
-                        dia_semana,
+            # Actualizar todas las actividades de esta materia
+            for descripcion, datos in tareas_actividad.items():
+                if datos["materia"] == key and descripcion not in tareas_procesadas:
+                    tiempo_total_original = datos["tiempo_total_original"]
+                    tiempo_total_ajustado = tiempo_total_original * factor_ajuste
+
+                    # Recalcular distribución con el nuevo tiempo total
+                    dias_faltantes = datos["dias_faltantes"]
+                    nuevo_tiempo_horas, nuevo_tiempo_horas_sig = (
+                        recalcular_distribucion_tiempo(
+                            tiempo_total_ajustado, dias_faltantes
+                        )
                     )
-                    tiempo_restante -= tiempo_ajustado_actividad
+
+                    # Actualizar tiempos
+                    tareas_actividad[descripcion]["tiempo_horas"] = nuevo_tiempo_horas
+                    tareas_actividad[descripcion][
+                        "tiempo_horas_sig"
+                    ] = nuevo_tiempo_horas_sig
+                    tareas_actividad[descripcion][
+                        "tiempo_total_original"
+                    ] = tiempo_total_ajustado
                     tareas_procesadas.add(descripcion)
 
-    # Restar el tiempo de las tareas que no fueron ajustadas por frecuencias
-    for descripcion, (tiempo_horas, dia_semana) in tareas_por_actividad.items():
-        if descripcion not in tareas_procesadas:
-            tiempo_restante -= tiempo_horas
+    # Calcular tiempo restante (solo sumando tiempo_horas, no tiempo_horas_sig)
+    tiempo_total_primera_semana = sum(
+        datos["tiempo_horas"] for datos in tareas_actividad.values()
+    )
+    tiempo_restante = tiempo_semanal - tiempo_total_primera_semana
 
-    return {
-        "por_materia": tareas_por_materia,
-        "por_actividad": tareas_por_actividad,
-        "tiempo_restante": tiempo_restante,
-    }
+    # Limpiar los campos auxiliares del output final
+    for descripcion in tareas_actividad:
+        del tareas_actividad[descripcion]["materia"]
+        del tareas_actividad[descripcion]["tiempo_total_original"]
+
+    # Crear resultado final
+    resultado = {"tareas": tareas_actividad, "tiempo_restante": tiempo_restante}
+
+    return resultado
 
 
 def calc_dif_horas(inicio, fin):
@@ -263,6 +329,10 @@ def obtener_tiempo_libre(json: dict, frecuencias: dict):
     }
 
 
+import numpy as np
+from datetime import datetime, timedelta
+
+
 def asignar_horarios_estudio(
     horas_materias: dict,
     periodos_libres: dict,
@@ -270,6 +340,8 @@ def asignar_horarios_estudio(
     tiempo_total_libre: dict,
     dia_actual: str,
     hora_actual: str,
+    tiempo_sabado: float,
+    tiempo_domingo: float,
 ):
     horarios_materias = {}
     horarios_tareas = {}
@@ -281,7 +353,7 @@ def asignar_horarios_estudio(
         "miércoles": "Mié",
         "jueves": "Jue",
         "viernes": "Vie",
-        "sábado": "Sab",
+        "sabado": "Sab",
         "domingo": "Dom",
     }
 
@@ -414,7 +486,10 @@ def asignar_horarios_estudio(
         float(horas[0]) if isinstance(horas, np.ndarray) else float(horas)
         for horas in horas_materias.values()
     )
-    tiempo_total_tareas = sum(tiempo for tiempo, _ in tareas_actividad.values())
+    # Extraer solo tiempo_horas de tareas (no tiempo_horas_sig)
+    tiempo_total_tareas = sum(
+        datos["tiempo_horas"] for datos in tareas_actividad["tareas"].values()
+    )
     tiempo_necesario_total = tiempo_total_materias + tiempo_total_tareas
 
     # Calcular tiempo libre total disponible (incluyendo próxima semana)
@@ -631,15 +706,27 @@ def asignar_horarios_estudio(
 
     # PASO 7: Priorizar y ordenar tareas
     tareas_priorizadas = []
-    for tarea, (tiempo_horas, dia_entrega) in tareas_actividad.items():
+    for tarea, datos in tareas_actividad["tareas"].items():
+        tiempo_horas = datos["tiempo_horas"]
+        dia_entrega = (
+            datos["dia_semana"] if datos["dia_semana"] else "lunes"
+        )  # Default si es None
         prioridad = calcular_prioridad(tarea, tiempo_horas, dia_entrega)
-        tareas_priorizadas.append((prioridad, tarea, tiempo_horas, dia_entrega))
+        tareas_priorizadas.append((prioridad, tarea, tiempo_horas, dia_entrega, datos))
 
     # Ordenar por prioridad (mayor prioridad primero)
     tareas_priorizadas.sort(key=lambda x: x[0], reverse=True)
 
-    # PASO 8: Asignar tareas según prioridad
-    for prioridad, tarea, tiempo_horas, dia_entrega in tareas_priorizadas:
+    # PASO 8: Asignar tareas según prioridad (solo para horarios de materias)
+    # Las tareas se procesan para el primer diccionario (horarios_materias) pero
+    # el segundo diccionario será diferente
+    tareas_asignaciones_horarios = {}
+
+    for prioridad, tarea, tiempo_horas, dia_entrega, datos in tareas_priorizadas:
+        if datos["dia_semana"] is None:
+            # Si dia_semana es None, no asignar en horarios (solo en tiempos por día)
+            continue
+
         # Determinar qué días están disponibles para esta tarea
         dia_entrega_abrev = dias_completos[dia_entrega]
 
@@ -651,7 +738,7 @@ def asignar_horarios_estudio(
                 break
             dias_disponibles.append(dia)
 
-        horarios_tareas[tarea] = {}
+        tareas_asignaciones_horarios[tarea] = {}
         tiempo_restante = tiempo_horas
 
         # Intentar asignar en los días disponibles
@@ -664,7 +751,7 @@ def asignar_horarios_estudio(
             )
 
             if asignaciones:
-                horarios_tareas[tarea][dia] = asignaciones
+                tareas_asignaciones_horarios[tarea][dia] = asignaciones
 
         # Si no se pudo asignar todo el tiempo, reportar
         if tiempo_restante > 0:
@@ -725,9 +812,411 @@ def asignar_horarios_estudio(
                     horarios_materias[materia][dia] = []
                 horarios_materias[materia][dia].extend(asignaciones)
 
+    # TRANSFORMAR horarios_materias de organizado por materia a organizado por día
+    def transformar_horarios_materias(horarios_por_materia):
+        """
+        Transforma el diccionario de horarios organizados por materia
+        a un diccionario organizado por día con el formato requerido
+        """
+        horarios_por_dia = {}
+
+        for materia, dias_horarios in horarios_por_materia.items():
+            for dia, horarios in dias_horarios.items():
+                if dia not in horarios_por_dia:
+                    horarios_por_dia[dia] = []
+
+                # Convertir cada tupla (inicio, fin) al formato de diccionario
+                for hora_inicio, hora_fin in horarios:
+                    horarios_por_dia[dia].append(
+                        {
+                            "horaInicio": hora_inicio,
+                            "horaFin": hora_fin,
+                            "materia": materia,
+                        }
+                    )
+
+        # Ordenar los horarios por hora de inicio en cada día
+        for dia in horarios_por_dia:
+            horarios_por_dia[dia].sort(key=lambda x: x["horaInicio"])
+
+        return horarios_por_dia
+
+    # Aplicar la transformación
+    horarios_materias_transformado = transformar_horarios_materias(horarios_materias)
+
+    # PASO 10: Crear nuevo formato para horarios_tareas (por tiempos por día con fechas)
+    def calcular_fecha_real(dia_codigo, dia_actual, fecha_actual_str="2025-06-08"):
+        """Calcula la fecha real basándose en el código de día y día actual"""
+        from datetime import datetime, timedelta
+
+        fecha_actual = datetime.strptime(fecha_actual_str, "%Y-%m-%d")
+
+        # Mapeo de códigos de día a números de semana
+        mapeo_dias = {
+            "Lun": 0,
+            "Mar": 1,
+            "Mié": 2,
+            "Jue": 3,
+            "Vie": 4,
+            "Sab": 5,
+            "Dom": 6,
+        }
+
+        if dia_codigo.endswith("_p"):
+            # Día de próxima semana
+            dia_base = dia_codigo[:-2]
+            dias_a_sumar = mapeo_dias[dia_base] - fecha_actual.weekday() + 7
+        else:
+            # Día de esta semana
+            dias_a_sumar = mapeo_dias[dia_codigo] - fecha_actual.weekday()
+            if dias_a_sumar < 0:
+                dias_a_sumar += 7
+
+        fecha_resultado = fecha_actual + timedelta(days=dias_a_sumar)
+        return fecha_resultado.strftime("%Y-%m-%d")
+
+    def obtener_tiempo_libre_dia(dia_codigo):
+        """Obtiene el tiempo libre disponible para un día específico"""
+        if dia_codigo.endswith("_p"):
+            dia_base = dia_codigo[:-2]
+        else:
+            dia_base = dia_codigo
+
+        if dia_base == "Sab":
+            return tiempo_sabado
+        elif dia_base == "Dom":
+            return tiempo_domingo
+        else:
+            return tiempo_total_libre.get(dia_base, 0)
+
+    def verificar_conflicto_horarios(
+        fecha, tiempo_requerido_horas, horarios_materias_existentes
+    ):
+        """Verifica si hay conflicto entre actividad y horarios de materias en una fecha"""
+        # Buscar si hay horarios de materias en esa fecha
+        dia_codigo = None
+        fecha_obj = datetime.strptime(fecha, "%Y-%m-%d")
+
+        # Encontrar el código de día correspondiente a la fecha
+        for dia in dias_semana_orden:
+            fecha_dia = calcular_fecha_real(dia, dia_actual)
+            if fecha_dia == fecha:
+                dia_codigo = dia
+                break
+
+        if not dia_codigo or dia_codigo not in horarios_materias_existentes:
+            return False, 0  # No hay conflicto
+
+        # Calcular tiempo total ocupado por horarios de materias ese día
+        tiempo_ocupado = 0
+        for materia, horarios_por_dia in horarios_materias_existentes.items():
+            if dia_codigo in horarios_por_dia:
+                for horario in horarios_por_dia[dia_codigo]:
+                    inicio = hora_a_decimal(horario["horaInicio"])
+                    fin = hora_a_decimal(horario["horaFin"])
+                    tiempo_ocupado += fin - inicio
+
+        tiempo_libre_dia = obtener_tiempo_libre_dia(dia_codigo)
+        tiempo_disponible = tiempo_libre_dia - tiempo_ocupado
+
+        # Hay conflicto si no hay suficiente tiempo para la actividad
+        return tiempo_disponible < tiempo_requerido_horas, tiempo_ocupado
+
+    def reubicar_horarios_materias(
+        fecha_conflicto, tiempo_necesario_liberar, horarios_materias_existentes
+    ):
+        """Reubica horarios de materias para liberar tiempo en una fecha específica"""
+        dia_codigo_conflicto = None
+        fecha_obj = datetime.strptime(fecha_conflicto, "%Y-%m-%d")
+
+        # Encontrar el código de día correspondiente a la fecha
+        for dia in dias_semana_orden:
+            fecha_dia = calcular_fecha_real(dia, dia_actual)
+            if fecha_dia == fecha_conflicto:
+                dia_codigo_conflicto = dia
+                break
+
+        if not dia_codigo_conflicto:
+            return False
+
+        tiempo_liberado = 0
+        materias_a_reubicar = []
+
+        # Identificar qué horarios de materias mover
+        for materia, horarios_por_dia in horarios_materias_existentes.items():
+            if dia_codigo_conflicto in horarios_por_dia:
+                for horario in horarios_por_dia[dia_codigo_conflicto]:
+                    inicio = hora_a_decimal(horario["horaInicio"])
+                    fin = hora_a_decimal(horario["horaFin"])
+                    tiempo_horario = fin - inicio
+
+                    materias_a_reubicar.append(
+                        {
+                            "materia": materia,
+                            "tiempo": tiempo_horario,
+                            "horario": horario,
+                        }
+                    )
+                    tiempo_liberado += tiempo_horario
+
+                    if tiempo_liberado >= tiempo_necesario_liberar:
+                        break
+
+            if tiempo_liberado >= tiempo_necesario_liberar:
+                break
+
+        # Reubicar las materias en otros días
+        for item in materias_a_reubicar:
+            if tiempo_liberado < tiempo_necesario_liberar:
+                break
+
+            materia = item["materia"]
+            tiempo_reubicar = item["tiempo"]
+
+            # Remover el horario original
+            horarios_materias_existentes[materia][dia_codigo_conflicto].remove(
+                item["horario"]
+            )
+            if not horarios_materias_existentes[materia][dia_codigo_conflicto]:
+                del horarios_materias_existentes[materia][dia_codigo_conflicto]
+
+            # Buscar un día alternativo para reubicar
+            reubicado = False
+            for dia_alternativo in dias_semana_orden:
+                if dia_alternativo == dia_codigo_conflicto:
+                    continue
+
+                tiempo_libre_alternativo = obtener_tiempo_libre_dia(dia_alternativo)
+
+                # Calcular tiempo ya ocupado en el día alternativo
+                tiempo_ocupado_alternativo = 0
+                for mat, horarios in horarios_materias_existentes.items():
+                    if dia_alternativo in horarios:
+                        for h in horarios[dia_alternativo]:
+                            inicio = hora_a_decimal(h["horaInicio"])
+                            fin = hora_a_decimal(h["horaFin"])
+                            tiempo_ocupado_alternativo += fin - inicio
+
+                if (
+                    tiempo_libre_alternativo - tiempo_ocupado_alternativo
+                    >= tiempo_reubicar
+                ):
+                    # Reubicar aquí
+                    if materia not in horarios_materias_existentes:
+                        horarios_materias_existentes[materia] = {}
+                    if dia_alternativo not in horarios_materias_existentes[materia]:
+                        horarios_materias_existentes[materia][dia_alternativo] = []
+
+                    # Crear nuevo horario (simplificado, podría mejorarse)
+                    nuevo_inicio = "09:00"  # Hora por defecto
+                    nuevo_fin = decimal_a_hora(
+                        hora_a_decimal(nuevo_inicio) + tiempo_reubicar
+                    )
+
+                    horarios_materias_existentes[materia][dia_alternativo].append(
+                        {
+                            "horaInicio": nuevo_inicio,
+                            "horaFin": nuevo_fin,
+                            "materia": materia,
+                        }
+                    )
+
+                    reubicado = True
+                    tiempo_liberado -= tiempo_reubicar
+                    break
+
+            if not reubicado:
+                # Si no se pudo reubicar, mantener el original
+                horarios_materias_existentes[materia][dia_codigo_conflicto].append(
+                    item["horario"]
+                )
+
+        return tiempo_liberado >= tiempo_necesario_liberar
+
+    # Crear estructura para el nuevo horarios_tareas
+    horarios_tareas_por_tiempo = {}
+
+    # Crear copia de horarios de materias para manejar reubicaciones
+    horarios_materias_copia = {}
+    for materia, dias in horarios_materias.items():
+        horarios_materias_copia[materia] = {}
+        for dia, horarios in dias.items():
+            horarios_materias_copia[materia][dia] = horarios.copy()
+
+    # Primero, necesitamos organizar las tareas por materia
+    materias_tareas = {}
+
+    for nombre_tarea, datos_tarea in tareas_actividad["tareas"].items():
+        # Si no tenemos información de materia directa, crearemos una materia genérica
+        materia = "Tareas Generales"
+
+        if materia not in materias_tareas:
+            materias_tareas[materia] = []
+
+        materias_tareas[materia].append({"nombre": nombre_tarea, "datos": datos_tarea})
+
+    # Distribuir tiempo por días para cada materia
+    for materia, lista_tareas in materias_tareas.items():
+        horarios_tareas_por_tiempo[materia] = []
+
+        for tarea_info in lista_tareas:
+            nombre_tarea = tarea_info["nombre"]
+            datos = tarea_info["datos"]
+
+            # Crear estructura base de la tarea
+            tarea_estructura = {
+                "descripcion": nombre_tarea,
+                "tiempoDuracion": int(
+                    (datos["tiempo_horas"] + (datos["tiempo_horas_sig"] or 0)) * 60
+                ),
+                "fechaEntrega": datos["fecha_entrega"],
+                "done": {},
+            }
+
+            contador_fecha = 1
+
+            # PASO 1: Distribuir tiempo_horas (próximos 7 días)
+            if datos["tiempo_horas"] > 0:
+                tiempo_horas_minutos = int(datos["tiempo_horas"] * 60)
+                tiempo_restante_distribuir = tiempo_horas_minutos
+
+                if datos["dia_semana"] is not None:
+                    # Tarea con fecha de entrega <= 7 días
+                    dias_para_trabajar = []
+                    for dia in dias_semana_orden:
+                        dia_entrega_abrev = dias_completos[datos["dia_semana"]]
+                        dia_comparar = dia[:-2] if dia.endswith("_p") else dia
+                        if dia_comparar == dia_entrega_abrev:
+                            break
+                        dias_para_trabajar.append(dia)
+                else:
+                    # Tarea con fecha de entrega > 7 días, usar todos los próximos 7 días
+                    dias_para_trabajar = dias_semana_orden[:7]
+
+                # Distribuir con restricción de 20 minutos mínimos
+                for dia in dias_para_trabajar:
+                    if tiempo_restante_distribuir <= 0:
+                        break
+
+                    fecha_dia = calcular_fecha_real(dia, dia_actual)
+                    tiempo_libre_dia = obtener_tiempo_libre_dia(dia)
+
+                    # Calcular tiempo proporcional, pero mínimo 20 minutos
+                    tiempo_libre_total = sum(
+                        obtener_tiempo_libre_dia(d) for d in dias_para_trabajar
+                    )
+                    if tiempo_libre_total > 0:
+                        proporcion = tiempo_libre_dia / tiempo_libre_total
+                        tiempo_propuesto = int(tiempo_horas_minutos * proporcion)
+                    else:
+                        tiempo_propuesto = tiempo_restante_distribuir // len(
+                            dias_para_trabajar
+                        )
+
+                    # Aplicar restricción de 20 minutos mínimos
+                    if tiempo_propuesto < 20 and tiempo_restante_distribuir >= 20:
+                        tiempo_asignado = 20
+                    elif tiempo_restante_distribuir < 20:
+                        # Excepción: si queda menos de 20 minutos total
+                        tiempo_asignado = tiempo_restante_distribuir
+                    else:
+                        tiempo_asignado = min(
+                            tiempo_propuesto, tiempo_restante_distribuir
+                        )
+
+                    if tiempo_asignado > 0:
+                        # Verificar conflictos con horarios de materias
+                        hay_conflicto, tiempo_ocupado = verificar_conflicto_horarios(
+                            fecha_dia, tiempo_asignado / 60, horarios_materias_copia
+                        )
+
+                        if hay_conflicto:
+                            # Intentar reubicar horarios de materias
+                            tiempo_necesario = tiempo_asignado / 60
+                            if reubicar_horarios_materias(
+                                fecha_dia, tiempo_necesario, horarios_materias_copia
+                            ):
+                                # Reubicación exitosa, asignar tiempo
+                                tarea_estructura["done"][f"Fecha{contador_fecha}"] = {
+                                    "Duracion": tiempo_asignado,
+                                    "fecha": fecha_dia,
+                                }
+                                tiempo_restante_distribuir -= tiempo_asignado
+                                contador_fecha += 1
+                            # Si no se puede reubicar, intentar el siguiente día
+                        else:
+                            # No hay conflicto, asignar directamente
+                            tarea_estructura["done"][f"Fecha{contador_fecha}"] = {
+                                "Duracion": tiempo_asignado,
+                                "fecha": fecha_dia,
+                            }
+                            tiempo_restante_distribuir -= tiempo_asignado
+                            contador_fecha += 1
+
+            # PASO 2: Distribuir tiempo_horas_sig (tiempo futuro, sin considerar horarios de estudio)
+            if datos["tiempo_horas_sig"] is not None and datos["tiempo_horas_sig"] > 0:
+                tiempo_sig_minutos = int(datos["tiempo_horas_sig"] * 60)
+
+                # Distribuir en fechas futuras (después de 7 días)
+                # Calcular fechas futuras basándose en la fecha de entrega
+                fecha_entrega = datetime.strptime(datos["fecha_entrega"], "%Y-%m-%d")
+                fecha_actual_obj = datetime.strptime(
+                    "2025-06-08", "%Y-%m-%d"
+                )  # Ajustar según sea necesario
+
+                # Distribuir en días entre el día 8 y la fecha de entrega
+                dias_disponibles_futuro = max(
+                    1, (fecha_entrega - fecha_actual_obj).days - 7
+                )
+                tiempo_por_dia_futuro = max(
+                    20, tiempo_sig_minutos // max(1, dias_disponibles_futuro)
+                )
+
+                fecha_inicio_futuro = fecha_actual_obj + timedelta(days=8)
+                tiempo_restante_futuro = tiempo_sig_minutos
+
+                dia_actual_futuro = 0
+                while (
+                    tiempo_restante_futuro > 0
+                    and dia_actual_futuro < dias_disponibles_futuro
+                ):
+                    fecha_futura = fecha_inicio_futuro + timedelta(
+                        days=dia_actual_futuro
+                    )
+
+                    if fecha_futura >= fecha_entrega:
+                        break
+
+                    tiempo_asignado_futuro = min(
+                        tiempo_por_dia_futuro, tiempo_restante_futuro
+                    )
+
+                    # Aplicar restricción de 20 minutos mínimos
+                    if tiempo_asignado_futuro < 20 and tiempo_restante_futuro >= 20:
+                        tiempo_asignado_futuro = 20
+                    elif tiempo_restante_futuro < 20:
+                        tiempo_asignado_futuro = tiempo_restante_futuro
+
+                    if tiempo_asignado_futuro > 0:
+                        tarea_estructura["done"][f"Fecha{contador_fecha}"] = {
+                            "Duracion": tiempo_asignado_futuro,
+                            "fecha": fecha_futura.strftime("%Y-%m-%d"),
+                        }
+                        tiempo_restante_futuro -= tiempo_asignado_futuro
+                        contador_fecha += 1
+
+                    dia_actual_futuro += 1
+
+            horarios_tareas_por_tiempo[materia].append(tarea_estructura)
+
+    # Actualizar horarios_materias con las reubicaciones realizadas
+    horarios_materias_transformado = transformar_horarios_materias(
+        horarios_materias_copia
+    )
+
     return {
-        "horarios_materias": horarios_materias,
-        "horarios_tareas": horarios_tareas,
+        "horarios_materias": horarios_materias_transformado,
+        "horarios_tareas": horarios_tareas_por_tiempo,
         "tiempo_descanso_reservado": tiempo_descanso_por_dia,
         "orden_dias": dias_semana_orden,  # Para referencia
     }
@@ -929,280 +1418,3 @@ def predecir_individuo(tiempo: float, materias: dict, dias: dict, modelosKnn: KN
 
         predicciones[model] = modelosKnn.predict(model, X_df) * 5
     return predicciones
-
-
-def asignar_horarios_estudio(
-    horas_materias: dict,
-    periodos_libres: dict,
-    tareas_actividad: dict,
-    tiempo_total_libre: dict,
-):
-    horarios_materias = {}
-    horarios_tareas = {}
-
-    # Mapeo de días
-    dias_semana_orden = ["Lun", "Mar", "Mié", "Jue", "Vie"]
-    dias_completos = {
-        "lunes": "Lun",
-        "martes": "Mar",
-        "miércoles": "Mié",
-        "jueves": "Jue",
-        "viernes": "Vie",
-        "sábado": "Sab",
-        "domingo": "Dom",
-    }
-
-    def hora_a_decimal(hora_str):
-        partes = hora_str.split(":")
-        return int(partes[0]) + int(partes[1]) / 60
-
-    def decimal_a_hora(decimal):
-        horas = int(decimal)
-        minutos = int((decimal - horas) * 60)
-        return f"{horas:02d}:{minutos:02d}"
-
-    # PASO 1: Calcular tiempo total necesario
-    tiempo_total_materias = sum(
-        float(horas[0]) if isinstance(horas, np.ndarray) else float(horas)
-        for horas in horas_materias.values()
-    )
-    tiempo_total_tareas = sum(tiempo for tiempo, _ in tareas_actividad.values())
-    tiempo_necesario_total = tiempo_total_materias + tiempo_total_tareas
-
-    # Calcular tiempo libre total disponible
-    tiempo_libre_total_semana = sum(
-        tiempo_total_libre.get(dia, 0) for dia in dias_semana_orden
-    )
-
-    # PASO 2: Reservar tiempo de descanso si es posible
-    tiempo_descanso_disponible = max(
-        0, tiempo_libre_total_semana - tiempo_necesario_total
-    )
-    tiempo_descanso_por_dia = {}
-
-    if tiempo_descanso_disponible > 0:
-        # Distribuir el descanso proporcionalmente entre los días según su tiempo libre
-        for dia in dias_semana_orden:
-            if tiempo_total_libre.get(dia, 0) > 0:
-                proporcion = tiempo_total_libre[dia] / tiempo_libre_total_semana
-                tiempo_descanso_por_dia[dia] = tiempo_descanso_disponible * proporcion
-            else:
-                tiempo_descanso_por_dia[dia] = 0
-
-    # PASO 3: Crear períodos disponibles después de reservar descanso
-    def reservar_descanso_en_periodo(periodos_dia, tiempo_descanso):
-        """Reserva tiempo de descanso al final de los períodos del día"""
-        if tiempo_descanso <= 0 or not periodos_dia:
-            return periodos_dia.copy()
-
-        periodos_restantes = periodos_dia.copy()
-        tiempo_a_reservar = tiempo_descanso
-
-        # Empezar desde el final de los períodos
-        i = len(periodos_restantes) - 1
-        while i >= 0 and tiempo_a_reservar > 0:
-            inicio, fin = periodos_restantes[i]
-            inicio_decimal = hora_a_decimal(inicio)
-            fin_decimal = hora_a_decimal(fin)
-            tiempo_periodo = fin_decimal - inicio_decimal
-
-            if tiempo_a_reservar >= tiempo_periodo:
-                # Reservar todo el período
-                periodos_restantes.pop(i)
-                tiempo_a_reservar -= tiempo_periodo
-            else:
-                # Reservar parte del período (desde el final)
-                nuevo_fin = fin_decimal - tiempo_a_reservar
-                periodos_restantes[i] = (inicio, decimal_a_hora(nuevo_fin))
-                tiempo_a_reservar = 0
-
-            i -= 1
-
-        return periodos_restantes
-
-    periodos_disponibles = {}
-    for dia in dias_semana_orden:
-        if dia in periodos_libres:
-            # Reservar descanso antes de usar los períodos
-            periodos_con_descanso = reservar_descanso_en_periodo(
-                periodos_libres[dia], tiempo_descanso_por_dia.get(dia, 0)
-            )
-            periodos_disponibles[dia] = periodos_con_descanso
-        else:
-            periodos_disponibles[dia] = []
-
-    def calcular_prioridad(tarea, tiempo_horas, dia_entrega):
-        """Calcula la prioridad de una tarea basada en urgencia y duración"""
-        dia_entrega_abrev = dias_completos[dia_entrega]
-
-        # Determinar días disponibles para trabajar
-        if dia_entrega_abrev in [
-            "Sab",
-            "Dom",
-            "Lun",
-        ]:  # Lunes tratado como fin de semana
-            dias_disponibles = 5  # Toda la semana laboral
-        elif dia_entrega_abrev in dias_semana_orden[1:]:  # Martes a Viernes
-            indice_entrega = dias_semana_orden.index(dia_entrega_abrev)
-            dias_disponibles = indice_entrega  # Hasta el día anterior
-        else:
-            dias_disponibles = 5
-
-        # Si no tiene días disponibles, máxima prioridad
-        if dias_disponibles == 0:
-            return 1000
-
-        # Factor de urgencia (menos días = más urgente)
-        factor_urgencia = (6 - dias_disponibles) / 5  # 0.2 a 1.0
-
-        # Factor de duración (más horas = más prioritario)
-        factor_duracion = min(tiempo_horas / 10, 1.0)  # Normalizar a máximo 1.0
-
-        # Combinar factores (urgencia tiene más peso)
-        prioridad = (factor_urgencia * 0.7) + (factor_duracion * 0.3)
-
-        return prioridad
-
-    def asignar_tiempo_en_periodo(dia, tiempo_necesario, descripcion, es_tarea=True):
-        """Asigna tiempo en los períodos disponibles de un día específico"""
-        asignaciones = []
-        tiempo_restante = tiempo_necesario
-
-        i = 0
-        while i < len(periodos_disponibles[dia]) and tiempo_restante > 0:
-            inicio, fin = periodos_disponibles[dia][i]
-            inicio_decimal = hora_a_decimal(inicio)
-            fin_decimal = hora_a_decimal(fin)
-            tiempo_periodo = fin_decimal - inicio_decimal
-
-            if tiempo_periodo > 0:
-                if tiempo_restante <= tiempo_periodo:
-                    # El tiempo restante cabe en este período
-                    fin_asignacion = inicio_decimal + tiempo_restante
-                    asignaciones.append((inicio, decimal_a_hora(fin_asignacion)))
-
-                    # Actualizar el período disponible
-                    if fin_asignacion < fin_decimal:
-                        periodos_disponibles[dia][i] = (
-                            decimal_a_hora(fin_asignacion),
-                            fin,
-                        )
-                    else:
-                        periodos_disponibles[dia].pop(i)
-
-                    tiempo_restante = 0
-                else:
-                    # Usar todo el período
-                    asignaciones.append((inicio, fin))
-                    tiempo_restante -= tiempo_periodo
-                    periodos_disponibles[dia].pop(i)
-                    continue
-            else:
-                i += 1
-            i += 1
-
-        return asignaciones, tiempo_restante
-
-    # PASO 4: Priorizar y ordenar tareas
-    tareas_priorizadas = []
-    for tarea, (tiempo_horas, dia_entrega) in tareas_actividad.items():
-        prioridad = calcular_prioridad(tarea, tiempo_horas, dia_entrega)
-        tareas_priorizadas.append((prioridad, tarea, tiempo_horas, dia_entrega))
-
-    # Ordenar por prioridad (mayor prioridad primero)
-    tareas_priorizadas.sort(key=lambda x: x[0], reverse=True)
-
-    # PASO 5: Asignar tareas según prioridad
-    for prioridad, tarea, tiempo_horas, dia_entrega in tareas_priorizadas:
-        # Determinar qué días están disponibles para esta tarea
-        dia_entrega_abrev = dias_completos[dia_entrega]
-
-        if dia_entrega_abrev in ["Sab", "Dom", "Lun"]:  # Lunes como próxima semana
-            # Entrega en fin de semana o lunes próximo: puede usar toda la semana laboral
-            dias_disponibles = dias_semana_orden.copy()
-        elif dia_entrega_abrev in dias_semana_orden[1:]:  # Martes a Viernes
-            # Entrega entre martes y viernes: usar hasta el día ANTERIOR
-            indice_entrega = dias_semana_orden.index(dia_entrega_abrev)
-            dias_disponibles = dias_semana_orden[:indice_entrega]
-        else:
-            dias_disponibles = dias_semana_orden.copy()
-
-        horarios_tareas[tarea] = {}
-        tiempo_restante = tiempo_horas
-
-        # Intentar asignar en los días disponibles
-        for dia in dias_disponibles:
-            if tiempo_restante <= 0:
-                break
-
-            asignaciones, tiempo_restante = asignar_tiempo_en_periodo(
-                dia, tiempo_restante, tarea, es_tarea=True
-            )
-
-            if asignaciones:
-                horarios_tareas[tarea][dia] = asignaciones
-
-        # Si no se pudo asignar todo el tiempo, reportar
-        if tiempo_restante > 0:
-            print(
-                f"Advertencia: No se pudo asignar {tiempo_restante:.2f} horas para {tarea} (entrega {dia_entrega})"
-            )
-
-    # PASO 6: Asignar tiempo de estudio de materias
-    for materia, horas_array in horas_materias.items():
-        horas_semanales = (
-            float(horas_array[0])
-            if isinstance(horas_array, np.ndarray)
-            else float(horas_array)
-        )
-
-        horarios_materias[materia] = {}
-        tiempo_restante = horas_semanales
-
-        # Distribuir el tiempo de manera equitativa entre los días
-        for dia in dias_semana_orden:
-            if tiempo_restante <= 0:
-                break
-
-            # Calcular cuánto tiempo asignar en este día (distribución equitativa)
-            dias_restantes = len(
-                [
-                    d
-                    for d in dias_semana_orden[dias_semana_orden.index(dia) :]
-                    if len(periodos_disponibles[d]) > 0
-                ]
-            )
-
-            if dias_restantes > 0:
-                tiempo_para_hoy = min(tiempo_restante / dias_restantes, tiempo_restante)
-
-                asignaciones, tiempo_no_asignado = asignar_tiempo_en_periodo(
-                    dia, tiempo_para_hoy, materia, es_tarea=False
-                )
-
-                if asignaciones:
-                    horarios_materias[materia][dia] = asignaciones
-
-                tiempo_restante -= tiempo_para_hoy - tiempo_no_asignado
-
-        # Si queda tiempo sin asignar, intentar distribuirlo en cualquier día disponible
-        for dia in dias_semana_orden:
-            if tiempo_restante <= 0:
-                break
-
-            asignaciones, tiempo_restante = asignar_tiempo_en_periodo(
-                dia, tiempo_restante, materia, es_tarea=False
-            )
-
-            if asignaciones:
-                if materia not in horarios_materias:
-                    horarios_materias[materia] = {}
-                if dia not in horarios_materias[materia]:
-                    horarios_materias[materia][dia] = []
-                horarios_materias[materia][dia].extend(asignaciones)
-
-    return {
-        "horarios_materias": horarios_materias,
-        "horarios_tareas": horarios_tareas,
-        "tiempo_descanso_reservado": tiempo_descanso_por_dia,
-    }

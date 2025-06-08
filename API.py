@@ -17,10 +17,11 @@ from auxi import (
 from statistics import mode
 import numpy as np
 import pandas as pd
+import os
 
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/predecir": {"origins": ["http://localhost:3000","https://lidesync.netlify.app"]}})
 
 
 modelosKnn = KNNModel(k=5)
@@ -94,16 +95,26 @@ def predecir():
         horarios = asignar_horarios_estudio(
             materias,
             tiempo_libre_por_dia["periodos_libres"],
-            tareas["por_actividad"],
+            tareas,
             tiempo_libre_por_dia["tiempo_total_libre"],
             dia_actual=mapeo_dias[dia_semana],
             hora_actual=hora,
+            tiempo_sabado=data["tiempo_fines"]["Sabado"],
+            tiempo_domingo=data["tiempo_fines"]["Domingo"],
         )
 
-        return jsonify(horarios)
+        return jsonify(data | horarios)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    return response
 
-
+# if __name__ == "__main__":
+#     app.run(debug=True)
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=True)
