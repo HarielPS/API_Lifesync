@@ -14,6 +14,8 @@ from auxi import (
     asignar_horarios_estudio,
     mapeo_dias,
 )
+from sklearn.model_selection import train_test_split
+from sklearn.neighbors import KNeighborsClassifier
 from statistics import mode
 import numpy as np
 import pandas as pd
@@ -39,7 +41,7 @@ for key in frecuencias.keys():
     frecuencias[key] = frecuencias[key] / suma
 
 n_df = nuevo_df(df, frecuencias)
-n_df["Semana"] = n_df.apply(
+n_df["Semana_l"] = n_df.apply(
     lambda x: mode(
         [
             x["Lunes"],
@@ -51,6 +53,21 @@ n_df["Semana"] = n_df.apply(
     ),
     axis=1,
 )
+
+X = n_df.drop(columns=["Semana_l"])
+y = n_df["Semana_l"].apply(lambda x: str(x))
+X_train, X_test, y_train, y_test = train_test_split(
+    X,
+    y,
+    test_size=0.2,
+)
+
+classifier = KNeighborsClassifier(n_neighbors=5)
+classifier.fit(X_train, y_train)
+
+n_df["Semana"] = classifier.predict(X)
+n_df["Semana"] = n_df["Semana"].astype(float)
+
 
 n_df.drop(columns=["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"], inplace=True)
 
@@ -91,6 +108,7 @@ def predecir():
             tiempo_libre_por_dia["materias"],
             tiempo_libre_por_dia["momento_mas_libre"],
             modelosKnn,
+            modelo=classifier,
         )
         horarios = asignar_horarios_estudio(
             materias,
@@ -99,14 +117,14 @@ def predecir():
             tiempo_libre_por_dia["tiempo_total_libre"],
             dia_actual=mapeo_dias[dia_semana],
             hora_actual=hora,
-            tiempo_sabado=data["tiempo_fines"]["Sabado"],
+            tiempo_sabado=data["tiempo_fines"]["Sábado"],
             tiempo_domingo=data["tiempo_fines"]["Domingo"],
         )
 
         return jsonify(data | horarios)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    
+
 @app.after_request
 def after_request(response):
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
