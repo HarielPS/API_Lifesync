@@ -68,8 +68,10 @@ classifier.fit(X_train, y_train)
 n_df["Semana"] = classifier.predict(X)
 n_df["Semana"] = n_df["Semana"].astype(float)
 
-
-n_df.drop(columns=["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"], inplace=True)
+n_df.drop(
+    columns=["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Semana_l"],
+    inplace=True,
+)
 
 tiempo_efectivo = {
     "8.5": n_df[n_df["Semana"] == 8.5]["Tiempo al día"].mean(),
@@ -117,7 +119,7 @@ def predecir():
             tiempo_libre_por_dia["tiempo_total_libre"],
             dia_actual=mapeo_dias[dia_semana],
             hora_actual=hora,
-            tiempo_sabado=data["tiempo_fines"]["Sábado"],
+            tiempo_sabado=data["tiempo_fines"]["Sabado"],
             tiempo_domingo=data["tiempo_fines"]["Domingo"],
         )
 
